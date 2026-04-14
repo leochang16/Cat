@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<title>🐱 貓咪聲音分析器</title>
+<style>
+  * { box-sizing: border-box; font-family: -apple-system, "Microsoft JhengHei", sans-serif; }
+  body { max-width: 720px; margin: 20px auto; padding: 20px; background: #fef6e4; color: #001858; }
+  h1 { text-align: center; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 20px; }
+  .tabs button { flex: 1; padding: 12px; border: none; background: #f3d2c1; cursor: pointer; border-radius: 8px; font-size: 16px; }
+  .tabs button.active { background: #f582ae; color: white; }
+  .panel { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+  .hidden { display: none; }
+  button.primary { background: #f582ae; color: white; border: none; padding: 14px 24px; border-radius: 8px; font-size: 16px; cursor: pointer; width: 100%; margin: 8px 0; }
+  button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary { background: #8bd3dd; color: #001858; border: none; padding: 10px 16px; border-radius: 6px; cursor: pointer; margin: 4px; }
+  button.danger { background: #ef4444; color: white; border: none; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+  input[type=text] { width: 100%; padding: 10px; border: 2px solid #f3d2c1; border-radius: 6px; font-size: 16px; }
+  .record-btn { width: 120px; height: 120px; border-radius: 50%; border: none; background: #f582ae; color: white; font-size: 48px; cursor: pointer; display: block; margin: 20px auto; box-shadow: 0 4px 12px rgba(245,130,174,0.4); }
+  .record-btn.recording { background: #ef4444; animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.08); } }
+  .status { text-align: center; font-size: 14px; color: #666; margin: 8px 0; }
+  .sample { padding: 12px; border: 1px solid #f3d2c1; border-radius: 8px; margin: 8px 0; display: flex; align-items: center; gap: 10px; }
+  .sample .label { flex: 1; font-weight: bold; }
+  .result { padding: 14px; border-radius: 8px; margin: 8px 0; }
+  .result.top { background: #f582ae; color: white; font-size: 18px; }
+  .result.other { background: #f3d2c1; }
+  .result .score { float: right; opacity: 0.8; font-size: 14px; }
+</style>
+</head>
+<body>
+<h1>🐱 貓咪聲音分析器</h1>
+
+<div class="tabs">
+  <button id="tab-train" class="active" onclick="showTab('train')">📚 訓練（錄音+標記）</button>
+  <button id="tab-analyze" onclick="showTab('analyze')">🔍 分析</button>
+  <button id="tab-list" onclick="showTab('list')">📂 資料庫</button>
+</div>
+
+<div id="panel-train" class="panel">
+  <h3>1. 錄一段貓叫聲</h3>
+  <button id="recBtn1" class="record-btn" onclick="toggleRecord('train')">🎙️</button>
+  <div id="status1" class="status">按一下開始錄音</div>
+  <audio id="preview1" controls style="width:100%; display:none;"></audio>
+  <h3>2. 這是什麼意思？</h3>
+  <input type="text" id="labelInput" placeholder="例如：討食、想出門、生氣、撒嬌…">
+  <button class="primary" onclick="saveSample()">💾 儲存到資料庫</button>
+</div>
+
+<div id="panel-analyze" class="panel hidden">
+  <h3>錄一段聲音，看看代表什麼</h3>
+  <button id="recBtn2" class="record-btn" onclick="toggleRecord('analyze')">🎙️</button>
+  <div id="status2" class="status">按一下開始錄音</div>
+  <audio id="preview2" controls style="width:100%; display:none;"></audio>
+  <button class="primary" onclick="analyze()">🔍 分析</button>
+  <div id="results"></div>
+</div>
+
+<div id="panel-list" class="panel hidden">
+  <h3>已儲存的樣本</h3>
+  <div id="sampleList"></div>
+  <button class="secondary" onclick="exportData()">📤 匯出 JSON</button>
+  <button class="secondary" onclick="document.getElementById('importFile').click()">📥 匯入 JSON</button>
+  <input type="file" id="importFile" style="display:none" accept=".json" onchange="importData(event)">
+  <hr style="margin:20px 0">
+  <h4>📦 批次匯入 WAV（CatMeows 資料集）</h4>
+  <p style="font-size:13px; color:#666">
+    1. 先到 <a href="https://zenodo.org/records/4008297" target="_blank">Zenodo</a> 下載 <code>dataset.zip</code> 並解壓縮<br>
+    2. 點下方按鈕，選擇所有 <code>.wav</code> 檔案（Ctrl/Cmd+A 全選）<br>
+    3. 系統會自動從檔名判斷標籤：F=討食、I=焦慮孤獨、B=梳毛
+  </p>
+  <button class="secondary" onclick="document.getElementById('wavFiles').click()">📂 選 WAV 檔批次匯入</button>
+  <input type="file" id="wavFiles" style="display:none" accept=".wav" multiple onchange="importWavs(event)">
+  <div id="importProgress" style="margin-top:10px; font-size:14px;"></div>
+</div>
+
+<script>
+// ===== 音訊特徵萃取 =====
+async function extractFeatures(audioBlob) {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const buf = await audioBlob.arrayBuffer();
+  const audioBuf = await ctx.decodeAudioData(buf);
+  const data = audioBuf.getChannelData(0);
+  const sr = audioBuf.sampleRate;
+  const duration = audioBuf.duration;
+
+  // 去除靜音邊緣
+  const threshold = 0.01;
+  let start = 0, end = data.length - 1;
+  while (start < data.length && Math.abs(data[start]) < threshold) start++;
+  while (end > start && Math.abs(data[end]) < threshold) end--;
+  const trimmed = data.slice(start, end + 1);
+  if (trimmed.length < 100) return null;
+
+  // RMS 音量
+  let sumSq = 0;
+  for (let i = 0; i < trimmed.length; i++) sumSq += trimmed[i] * trimmed[i];
+  const rms = Math.sqrt(sumSq / trimmed.length);
+
+  // 過零率
+  let zc = 0;
+  for (let i = 1; i < trimmed.length; i++) {
+    if ((trimmed[i-1] >= 0) !== (trimmed[i] >= 0)) zc++;
+  }
+  const zcr = zc / trimmed.length;
+
+  // FFT 取頻譜特徵
+  const fftSize = 2048;
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = fftSize;
+  const src = ctx.createBufferSource();
+  src.buffer = audioBuf;
+  // 離線 FFT：手動計算簡易頻譜
+  const spectrum = computeSpectrum(trimmed, sr, fftSize);
+  const centroid = spectralCentroid(spectrum, sr, fftSize);
+  const rolloff = spectralRolloff(spectrum, sr, fftSize);
+  // 頻帶能量（8 個頻帶）
+  const bands = bandEnergies(spectrum, sr, fftSize, 8);
+
+  ctx.close();
+  return {
+    duration: (end - start) / sr,
+    rms, zcr, centroid, rolloff,
+    bands
+  };
+}
+
+function computeSpectrum(data, sr, fftSize) {
+  // 簡易：取中間片段做 DFT magnitude（效率夠用）
+  const len = Math.min(fftSize, data.length);
+  const mid = Math.floor((data.length - len) / 2);
+  const slice = data.slice(mid, mid + len);
+  // 套漢寧窗
+  for (let i = 0; i < slice.length; i++) {
+    slice[i] *= 0.5 * (1 - Math.cos(2 * Math.PI * i / (slice.length - 1)));
+  }
+  // 只算到 Nyquist / 4 頻段就夠了（貓叫多在 0-8kHz）
+  const bins = fftSize / 2;
+  const mag = new Float32Array(bins);
+  for (let k = 0; k < bins; k++) {
+    let re = 0, im = 0;
+    for (let n = 0; n < slice.length; n++) {
+      const ang = -2 * Math.PI * k * n / fftSize;
+      re += slice[n] * Math.cos(ang);
+      im += slice[n] * Math.sin(ang);
+    }
+    mag[k] = Math.sqrt(re * re + im * im);
+  }
+  return mag;
+}
+
+function spectralCentroid(spec, sr, fftSize) {
+  let num = 0, den = 0;
+  for (let k = 0; k < spec.length; k++) {
+    const freq = k * sr / fftSize;
+    num += freq * spec[k];
+    den += spec[k];
+  }
+  return den > 0 ? num / den : 0;
+}
+
+function spectralRolloff(spec, sr, fftSize) {
+  let total = 0;
+  for (let k = 0; k < spec.length; k++) total += spec[k];
+  const target = total * 0.85;
+  let cum = 0;
+  for (let k = 0; k < spec.length; k++) {
+    cum += spec[k];
+    if (cum >= target) return k * sr / fftSize;
+  }
+  return 0;
+}
+
+function bandEnergies(spec, sr, fftSize, nBands) {
+  const maxFreq = 8000;
+  const maxBin = Math.min(spec.length, Math.floor(maxFreq * fftSize / sr));
+  const bands = new Array(nBands).fill(0);
+  const binsPerBand = Math.floor(maxBin / nBands);
+  for (let b = 0; b < nBands; b++) {
+    let sum = 0;
+    for (let k = b * binsPerBand; k < (b + 1) * binsPerBand; k++) sum += spec[k];
+    bands[b] = sum / binsPerBand;
+  }
+  // 正規化
+  const max = Math.max(...bands, 1e-9);
+  return bands.map(v => v / max);
+}
+
+// ===== 距離計算 =====
+function distance(a, b) {
+  // 特徵加權
+  const scalarDiff = Math.pow((a.duration - b.duration) / 2, 2)
+                   + Math.pow((a.zcr - b.zcr) * 5, 2)
+                   + Math.pow((a.centroid - b.centroid) / 2000, 2)
+                   + Math.pow((a.rolloff - b.rolloff) / 2000, 2);
+  let bandDiff = 0;
+  for (let i = 0; i < a.bands.length; i++) {
+    bandDiff += Math.pow(a.bands[i] - b.bands[i], 2);
+  }
+  return Math.sqrt(scalarDiff + bandDiff);
+}
+
+// ===== IndexedDB =====
+let db;
+const DB_NAME = 'catVoiceDB';
+const STORE = 'samples';
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = e => {
+      const d = e.target.result;
+      if (!d.objectStoreNames.contains(STORE)) {
+        d.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true });
+      }
+    };
+    req.onsuccess = e => { db = e.target.result; resolve(); };
+    req.onerror = e => reject(e);
+  });
+}
+
+function saveToDB(sample) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const req = tx.objectStore(STORE).add(sample);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = e => reject(e);
+  });
+}
+
+function getAllSamples() {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readonly');
+    const req = tx.objectStore(STORE).getAll();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = e => reject(e);
+  });
+}
+
+function deleteSample(id) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const req = tx.objectStore(STORE).delete(id);
+    req.onsuccess = () => resolve();
+    req.onerror = e => reject(e);
+  });
+}
+
+// ===== 錄音 =====
+let mediaRecorder, chunks = [], currentBlob = null, currentFeatures = null;
+let currentMode = 'train';
+
+async function toggleRecord(mode) {
+  currentMode = mode;
+  const btn = document.getElementById(mode === 'train' ? 'recBtn1' : 'recBtn2');
+  const status = document.getElementById(mode === 'train' ? 'status1' : 'status2');
+  const preview = document.getElementById(mode === 'train' ? 'preview1' : 'preview2');
+
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+    btn.classList.remove('recording');
+    btn.textContent = '🎙️';
+    status.textContent = '處理中…';
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream);
+    chunks = [];
+    mediaRecorder.ondataavailable = e => chunks.push(e.data);
+    mediaRecorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      currentBlob = new Blob(chunks, { type: 'audio/webm' });
+      preview.src = URL.createObjectURL(currentBlob);
+      preview.style.display = 'block';
+      status.textContent = '萃取特徵中…';
+      currentFeatures = await extractFeatures(currentBlob);
+      status.textContent = currentFeatures ? '✅ 完成，可以儲存/分析' : '⚠️ 聲音太短或太小聲';
+    };
+    mediaRecorder.start();
+    btn.classList.add('recording');
+    btn.textContent = '⏹️';
+    status.textContent = '🔴 錄音中… 再按一次停止';
+  } catch (err) {
+    status.textContent = '❌ 無法使用麥克風：' + err.message;
+  }
+}
+
+// ===== 儲存樣本 =====
+async function saveSample() {
+  const label = document.getElementById('labelInput').value.trim();
+  if (!label) return alert('請先輸入標籤');
+  if (!currentFeatures || !currentBlob) return alert('請先錄音');
+  const audioB64 = await blobToBase64(currentBlob);
+  await saveToDB({ label, features: currentFeatures, audio: audioB64, createdAt: Date.now() });
+  alert('✅ 已儲存！');
+  document.getElementById('labelInput').value = '';
+  document.getElementById('preview1').style.display = 'none';
+  currentBlob = null; currentFeatures = null;
+  renderList();
+}
+
+function blobToBase64(blob) {
+  return new Promise(r => {
+    const fr = new FileReader();
+    fr.onload = () => r(fr.result);
+    fr.readAsDataURL(blob);
+  });
+}
+
+// ===== 分析 =====
+async function analyze() {
+  if (!currentFeatures) return alert('請先錄音');
+  const samples = await getAllSamples();
+  if (samples.length === 0) return alert('資料庫是空的，請先去訓練頁面錄一些樣本');
+
+  const scored = samples.map(s => ({
+    label: s.label,
+    dist: distance(currentFeatures, s.features)
+  }));
+
+  // 依標籤分組，取每個標籤最近樣本距離平均
+  const grouped = {};
+  scored.forEach(s => {
+    if (!grouped[s.label]) grouped[s.label] = [];
+    grouped[s.label].push(s.dist);
+  });
+  const labelScores = Object.entries(grouped).map(([label, dists]) => {
+    dists.sort((a, b) => a - b);
+    const top = dists.slice(0, 3);
+    const avg = top.reduce((a, b) => a + b, 0) / top.length;
+    return { label, score: avg };
+  }).sort((a, b) => a.score - b.score);
+
+  const maxScore = Math.max(...labelScores.map(s => s.score));
+  const minScore = Math.min(...labelScores.map(s => s.score));
+  const range = maxScore - minScore || 1;
+
+  const resultsDiv = document.getElementById('results');
+  resultsDiv.innerHTML = '<h3>結果（越上面越像）</h3>' + labelScores.slice(0, 3).map((s, i) => {
+    const confidence = Math.round((1 - (s.score - minScore) / range) * 100);
+    return `<div class="result ${i === 0 ? 'top' : 'other'}">
+      ${i === 0 ? '🎯 ' : ''}${s.label}
+      <span class="score">相似度 ${confidence}%</span>
+    </div>`;
+  }).join('');
+}
+
+// ===== 樣本列表 =====
+async function renderList() {
+  const samples = await getAllSamples();
+  const div = document.getElementById('sampleList');
+  if (samples.length === 0) {
+    div.innerHTML = '<p style="color:#888">還沒有任何樣本</p>';
+    return;
+  }
+  // 按標籤分組
+  const grouped = {};
+  samples.forEach(s => {
+    if (!grouped[s.label]) grouped[s.label] = [];
+    grouped[s.label].push(s);
+  });
+  div.innerHTML = Object.entries(grouped).map(([label, arr]) =>
+    `<h4>${label} (${arr.length})</h4>` +
+    arr.map(s => `<div class="sample">
+      <audio controls src="${s.audio}" style="flex:1"></audio>
+      <button class="danger" onclick="removeSample(${s.id})">刪除</button>
+    </div>`).join('')
+  ).join('');
+}
+
+async function removeSample(id) {
+  if (!confirm('刪除這個樣本？')) return;
+  await deleteSample(id);
+  renderList();
+}
+
+// ===== 匯出/匯入 =====
+async function exportData() {
+  const samples = await getAllSamples();
+  const blob = new Blob([JSON.stringify(samples, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `cat-voice-${Date.now()}.json`;
+  a.click();
+}
+
+async function importData(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const text = await file.text();
+  const arr = JSON.parse(text);
+  for (const s of arr) {
+    delete s.id;
+    await saveToDB(s);
+  }
+  alert(`已匯入 ${arr.length} 筆`);
+  renderList();
+}
+
+// ===== 批次匯入 WAV (CatMeows) =====
+async function importWavs(e) {
+  const files = Array.from(e.target.files);
+  if (!files.length) return;
+  const progress = document.getElementById('importProgress');
+  const labelMap = { F: '討食', I: '焦慮孤獨', B: '梳毛' };
+  let ok = 0, skip = 0;
+
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    progress.textContent = `處理中 ${i + 1}/${files.length}：${f.name}`;
+    // CatMeows 檔名: C_NNNNN_BB_SS_OOOOO_RXX.wav，第二段是情境 F/I/B
+    const parts = f.name.split('_');
+    const ctx = parts[0]; // 有些版本第一段就是 F/I/B
+    const ctx2 = parts[2];
+    let label = labelMap[ctx] || labelMap[ctx2];
+    if (!label) { skip++; continue; }
+    try {
+      const feat = await extractFeatures(f);
+      if (!feat) { skip++; continue; }
+      const audioB64 = await blobToBase64(f);
+      await saveToDB({ label, features: feat, audio: audioB64, createdAt: Date.now(), source: 'CatMeows' });
+      ok++;
+    } catch (err) {
+      skip++;
+    }
+    // 讓 UI 更新
+    if (i % 5 === 0) await new Promise(r => setTimeout(r, 0));
+  }
+  progress.textContent = `✅ 完成！成功 ${ok} 筆，跳過 ${skip} 筆`;
+  renderList();
+}
+
+// ===== 分頁 =====
+function showTab(name) {
+  ['train', 'analyze', 'list'].forEach(n => {
+    document.getElementById('panel-' + n).classList.toggle('hidden', n !== name);
+    document.getElementById('tab-' + n).classList.toggle('active', n === name);
+  });
+  if (name === 'list') renderList();
+}
+
+// 啟動
+openDB().then(() => console.log('DB ready'));
+</script>
+</body>
+</html>
