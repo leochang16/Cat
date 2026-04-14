@@ -511,12 +511,16 @@ async function toggleRecord(mode) {
 
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    mediaRecorder = new MediaRecorder(stream);
+    // iOS Safari 不支援 webm，自動挑選可用格式
+    const candidates = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg'];
+    const mimeType = candidates.find(t => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) || '';
+    mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
     chunks = [];
     mediaRecorder.ondataavailable = e => chunks.push(e.data);
     mediaRecorder.onstop = async () => {
       stream.getTracks().forEach(t => t.stop());
-      currentBlob = new Blob(chunks, { type: 'audio/webm' });
+      const actualType = mediaRecorder.mimeType || mimeType || 'audio/webm';
+      currentBlob = new Blob(chunks, { type: actualType });
       preview.src = URL.createObjectURL(currentBlob);
       preview.style.display = 'block';
       status.textContent = '萃取特徵中…';
@@ -718,7 +722,40 @@ function showTab(name) {
   if (name === 'list') renderList();
 }
 
-openDB().then(() => console.log('DB ready'));
+async function loadPresetIfEmpty() {
+  const samples = await getAllSamples();
+  const hasPreset = samples.some(s => s.source === 'CatSound-preset');
+  if (hasPreset) return;
+  const banner = document.createElement('div');
+  banner.style.cssText = 'position:fixed;top:0;left:0;right:0;background:linear-gradient(135deg,#7d5a50,#c49a6c);color:white;padding:12px;text-align:center;font-weight:700;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,0.2);';
+  banner.textContent = '🐱 首次載入：正在建立內建貓咪情緒資料庫…';
+  document.body.appendChild(banner);
+  try {
+    const res = await fetch('preset-db.json');
+    if (!res.ok) throw new Error('fetch failed');
+    const presets = await res.json();
+    let ok = 0;
+    for (let i = 0; i < presets.length; i++) {
+      const p = presets[i];
+      banner.textContent = `🐱 載入內建資料庫 ${i + 1}/${presets.length}…`;
+      try {
+        const blob = await (await fetch(p.audio)).blob();
+        const feat = await extractFeatures(blob);
+        if (!feat) continue;
+        await saveToDB({ label: p.label, features: feat, audio: p.audio, createdAt: Date.now(), source: 'CatSound-preset' });
+        ok++;
+      } catch (e) {}
+      if (i % 3 === 0) await new Promise(r => setTimeout(r, 0));
+    }
+    banner.textContent = `✅ 內建資料庫載入完成（${ok} 筆），可以開始分析了！`;
+    setTimeout(() => banner.remove(), 3000);
+  } catch (e) {
+    banner.textContent = '⚠️ 內建資料庫載入失敗，可以手動匯入';
+    setTimeout(() => banner.remove(), 4000);
+  }
+}
+
+openDB().then(() => loadPresetIfEmpty());
 </script>
 </body>
 </html>
