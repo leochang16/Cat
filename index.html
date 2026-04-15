@@ -724,11 +724,15 @@ function showTab(name) {
 
 async function loadPresetIfEmpty() {
   const samples = await getAllSamples();
-  const hasPreset = samples.some(s => s.source === 'CatSound-preset');
-  if (hasPreset) return;
+  const presetCount = samples.filter(s => s.source === 'CatSound-preset').length;
+  if (presetCount >= 400) return;
+  // purge old small preset so new full one replaces it
+  if (presetCount > 0) {
+    for (const s of samples) if (s.source === 'CatSound-preset') await deleteSample(s.id);
+  }
   const banner = document.createElement('div');
   banner.style.cssText = 'position:fixed;top:0;left:0;right:0;background:linear-gradient(135deg,#7d5a50,#c49a6c);color:white;padding:12px;text-align:center;font-weight:700;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,0.2);';
-  banner.textContent = '🐱 首次載入：正在建立內建貓咪情緒資料庫…';
+  banner.textContent = '🐱 正在建立內建貓咪情緒資料庫（13 種情緒 ~485 筆）…';
   document.body.appendChild(banner);
   try {
     const res = await fetch('preset-db.json');
@@ -739,13 +743,16 @@ async function loadPresetIfEmpty() {
       const p = presets[i];
       banner.textContent = `🐱 載入內建資料庫 ${i + 1}/${presets.length}…`;
       try {
-        const blob = await (await fetch(p.audio)).blob();
-        const feat = await extractFeatures(blob);
+        let feat = p.features;
+        if (!feat && p.audio) {
+          const blob = await (await fetch(p.audio)).blob();
+          feat = await extractFeatures(blob);
+        }
         if (!feat) continue;
-        await saveToDB({ label: p.label, features: feat, audio: p.audio, createdAt: Date.now(), source: 'CatSound-preset' });
+        await saveToDB({ label: p.label, features: feat, audio: p.audio || null, createdAt: Date.now(), source: 'CatSound-preset' });
         ok++;
       } catch (e) {}
-      if (i % 3 === 0) await new Promise(r => setTimeout(r, 0));
+      if (i % 20 === 0) await new Promise(r => setTimeout(r, 0));
     }
     banner.textContent = `✅ 內建資料庫載入完成（${ok} 筆），可以開始分析了！`;
     setTimeout(() => banner.remove(), 3000);
